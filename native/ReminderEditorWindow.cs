@@ -16,6 +16,7 @@ namespace LocalReminder
         private readonly ComboBox intervalUnitInput;
         private readonly TextBox timeInput;
         private readonly ComboBox repeatTypeInput;
+        private readonly ComboBox popupModeInput;
         private readonly StackPanel intervalPanel;
         private readonly StackPanel fixedTimePanel;
         private readonly StackPanel weekdayPanel;
@@ -58,7 +59,10 @@ namespace LocalReminder
             titleInput.MaxLength = 80;
             AddField(fields, "提醒内容", titleInput);
 
-            scheduleTypeInput = CreateComboBox(new string[] { "固定间隔", "固定时间" });
+            popupModeInput = CreateComboBox(new string[] { "右上角", "全屏" });
+            AddField(fields, "弹窗方式", popupModeInput);
+
+            scheduleTypeInput = CreateComboBox(new string[] { "固定间隔", "固定时间", "连续亮屏" });
             AddField(fields, "提醒方式", scheduleTypeInput);
 
             intervalPanel = new StackPanel();
@@ -72,7 +76,7 @@ namespace LocalReminder
             Grid.SetColumn(intervalUnitInput, 1);
             intervalGrid.Children.Add(intervalInput);
             intervalGrid.Children.Add(intervalUnitInput);
-            AddField(intervalPanel, "每隔多久", intervalGrid);
+            AddField(intervalPanel, "提醒时长", intervalGrid);
             fields.Children.Add(intervalPanel);
 
             fixedTimePanel = new StackPanel();
@@ -171,8 +175,9 @@ namespace LocalReminder
         {
             if (original == null) return;
             titleInput.Text = original.Title;
-            scheduleTypeInput.SelectedIndex = original.ScheduleType == "fixedTime" ? 1 : 0;
-            if (original.ScheduleType == "interval")
+            popupModeInput.SelectedIndex = original.PopupMode == "fullscreen" ? 1 : 0;
+            scheduleTypeInput.SelectedIndex = original.ScheduleType == "fixedTime" ? 1 : original.ScheduleType == "screenTime" ? 2 : 0;
+            if (original.ScheduleType == "interval" || original.ScheduleType == "screenTime")
             {
                 bool hours = original.IntervalMinutes >= 60 && original.IntervalMinutes % 60 == 0;
                 intervalUnitInput.SelectedIndex = hours ? 1 : 0;
@@ -189,10 +194,10 @@ namespace LocalReminder
 
         private void UpdateVisibility()
         {
-            bool interval = scheduleTypeInput.SelectedIndex == 0;
-            intervalPanel.Visibility = interval ? Visibility.Visible : Visibility.Collapsed;
-            fixedTimePanel.Visibility = interval ? Visibility.Collapsed : Visibility.Visible;
-            weekdayPanel.Visibility = !interval && repeatTypeInput.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+            bool fixedTime = scheduleTypeInput.SelectedIndex == 1;
+            intervalPanel.Visibility = fixedTime ? Visibility.Collapsed : Visibility.Visible;
+            fixedTimePanel.Visibility = fixedTime ? Visibility.Visible : Visibility.Collapsed;
+            weekdayPanel.Visibility = fixedTime && repeatTypeInput.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void SaveClick(object sender, RoutedEventArgs eventArgs)
@@ -202,16 +207,17 @@ namespace LocalReminder
                 Reminder reminder = new Reminder();
                 reminder.Id = original == null ? Guid.NewGuid().ToString("N") : original.Id;
                 reminder.Title = titleInput.Text;
+                reminder.PopupMode = popupModeInput.SelectedIndex == 1 ? "fullscreen" : "corner";
                 reminder.Enabled = original == null || original.Enabled;
                 reminder.CreatedAt = original == null ? DateTime.Now : original.CreatedAt;
                 reminder.UpdatedAt = DateTime.Now;
 
-                if (scheduleTypeInput.SelectedIndex == 0)
+                if (scheduleTypeInput.SelectedIndex != 1)
                 {
                     int value;
                     if (!int.TryParse(intervalInput.Text, out value)) throw new ArgumentException("请输入整数提醒间隔");
                     checked { reminder.IntervalMinutes = intervalUnitInput.SelectedIndex == 1 ? value * 60 : value; }
-                    reminder.ScheduleType = "interval";
+                    reminder.ScheduleType = scheduleTypeInput.SelectedIndex == 2 ? "screenTime" : "interval";
                 }
                 else
                 {
@@ -223,7 +229,9 @@ namespace LocalReminder
                 }
 
                 ReminderValidator.Validate(reminder);
-                reminder.NextTriggerAt = reminder.Enabled ? (DateTime?)ReminderScheduler.ComputeNext(reminder, DateTime.Now) : null;
+                reminder.NextTriggerAt = reminder.Enabled && reminder.ScheduleType != "screenTime"
+                    ? (DateTime?)ReminderScheduler.ComputeNext(reminder, DateTime.Now)
+                    : null;
                 ResultReminder = reminder;
                 DialogResult = true;
             }

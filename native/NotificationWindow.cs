@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
@@ -12,23 +14,109 @@ namespace LocalReminder
     internal sealed class NotificationWindow : Window
     {
         private static readonly List<NotificationWindow> OpenWindows = new List<NotificationWindow>();
+        private static readonly Queue<string> PendingFullscreenTitles = new Queue<string>();
+        private static NotificationWindow activeFullscreen;
         private readonly DispatcherTimer closeTimer;
-        private Rect targetWorkArea;
+        private readonly bool fullScreen;
+        private System.Drawing.Rectangle targetPixelArea;
+        private double targetScale = 1;
         private string targetScreenKey;
 
-        public NotificationWindow(string reminderTitle)
+        public NotificationWindow(string reminderTitle) : this(reminderTitle, "corner")
         {
-            Width = 360;
-            Height = 126;
+        }
+
+        public NotificationWindow(string reminderTitle, string popupMode)
+        {
+            fullScreen = popupMode == "fullscreen";
+            Width = fullScreen ? 1024 : 360;
+            Height = fullScreen ? 768 : 126;
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
             AllowsTransparency = true;
             Background = Brushes.Transparent;
             ShowInTaskbar = false;
-            ShowActivated = false;
+            ShowActivated = fullScreen;
             Topmost = true;
             UseLayoutRounding = true;
 
+            Content = fullScreen ? CreateFullscreenContent(reminderTitle) : CreateCornerContent(reminderTitle);
+
+            SourceInitialized += delegate
+            {
+                CaptureTargetScreen();
+                if (fullScreen)
+                    PositionFullscreen();
+                else
+                    CaptureTargetDpi();
+            };
+            Loaded += delegate
+            {
+                if (fullScreen)
+                {
+                    PositionFullscreen();
+                }
+                else
+                {
+                    OpenWindows.Add(this);
+                    RepositionAll();
+                }
+                closeTimer.Start();
+            };
+            Closed += delegate
+            {
+                closeTimer.Stop();
+                if (fullScreen)
+                {
+                    if (object.ReferenceEquals(activeFullscreen, this))
+                    {
+                        activeFullscreen = null;
+                        ShowNextFullscreen();
+                    }
+                }
+                else
+                {
+                    OpenWindows.Remove(this);
+                    RepositionAll();
+                }
+            };
+
+            closeTimer = new DispatcherTimer();
+            closeTimer.Interval = TimeSpan.FromSeconds(10);
+            closeTimer.Tick += delegate
+            {
+                closeTimer.Stop();
+                Close();
+            };
+        }
+
+        internal static void ShowReminder(string reminderTitle, string popupMode)
+        {
+            if (popupMode != "fullscreen")
+            {
+                new NotificationWindow(reminderTitle, "corner").Show();
+                return;
+            }
+
+            PendingFullscreenTitles.Enqueue(reminderTitle);
+            ShowNextFullscreen();
+        }
+
+        private static void ShowNextFullscreen()
+        {
+            if (activeFullscreen != null || PendingFullscreenTitles.Count == 0) return;
+            if (Application.Current == null || Application.Current.Dispatcher.HasShutdownStarted)
+            {
+                PendingFullscreenTitles.Clear();
+                return;
+            }
+
+            activeFullscreen = new NotificationWindow(PendingFullscreenTitles.Dequeue(), "fullscreen");
+            activeFullscreen.Show();
+        }
+
+        private UIElement CreateCornerContent(string reminderTitle)
+        {
             Border card = new Border();
             card.Background = Brushes.White;
             card.BorderBrush = Theme.Line;
@@ -85,28 +173,56 @@ namespace LocalReminder
             layout.Children.Add(close);
 
             card.Child = layout;
-            Content = card;
+            return card;
+        }
 
-            Loaded += delegate
-            {
-                CaptureTargetScreen();
-                OpenWindows.Add(this);
-                RepositionAll();
-            };
-            Closed += delegate
-            {
-                OpenWindows.Remove(this);
-                RepositionAll();
-            };
+        private UIElement CreateFullscreenContent(string reminderTitle)
+        {
+            Border overlay = new Border();
+            overlay.Background = new SolidColorBrush(Color.FromArgb(238, 15, 28, 25));
 
-            closeTimer = new DispatcherTimer();
-            closeTimer.Interval = TimeSpan.FromSeconds(10);
-            closeTimer.Tick += delegate
+            Border card = new Border();
+            card.Width = 620;
+            card.MaxWidth = 620;
+            card.Padding = new Thickness(44, 40, 44, 36);
+            card.Background = Brushes.White;
+            card.CornerRadius = new CornerRadius(22);
+            card.HorizontalAlignment = HorizontalAlignment.Center;
+            card.VerticalAlignment = VerticalAlignment.Center;
+
+            StackPanel content = new StackPanel();
+            Border clockBox = new Border
             {
-                closeTimer.Stop();
-                Close();
+                Width = 64,
+                Height = 64,
+                Background = Theme.Green,
+                CornerRadius = new CornerRadius(18),
+                Child = CreateClock(),
+                HorizontalAlignment = HorizontalAlignment.Center
             };
-            closeTimer.Start();
+            content.Children.Add(clockBox);
+
+            TextBlock label = Theme.Text("现在该做", 13, Theme.Green, FontWeights.Bold);
+            label.HorizontalAlignment = HorizontalAlignment.Center;
+            label.Margin = new Thickness(0, 22, 0, 10);
+            content.Children.Add(label);
+
+            TextBlock title = Theme.Text(reminderTitle, 30, Theme.Ink, FontWeights.Bold);
+            title.TextAlignment = TextAlignment.Center;
+            title.TextWrapping = TextWrapping.Wrap;
+            title.MaxHeight = 150;
+            content.Children.Add(title);
+
+            Button close = Theme.Button("知道了", true);
+            close.Width = 126;
+            close.HorizontalAlignment = HorizontalAlignment.Center;
+            close.Margin = new Thickness(0, 28, 0, 0);
+            close.Click += delegate { Close(); };
+            content.Children.Add(close);
+
+            card.Child = content;
+            overlay.Child = card;
+            return overlay;
         }
 
         private static Canvas CreateClock()
@@ -140,14 +256,18 @@ namespace LocalReminder
                 if (!screenCounts.TryGetValue(window.targetScreenKey, out ordinal)) ordinal = 0;
                 screenCounts[window.targetScreenKey] = ordinal + 1;
 
-                Rect workArea = window.targetWorkArea;
-                int maximumRows = Math.Max(1, (int)Math.Floor((workArea.Height - 36) / (window.Height + 10)));
-                int row = ordinal % maximumRows;
-                int column = ordinal / maximumRows;
-                window.Left = Math.Max(
-                    workArea.Left + 18,
-                    workArea.Right - window.Width - 18 - column * (window.Width + 10));
-                window.Top = workArea.Top + 18 + row * (window.Height + 10);
+                System.Drawing.Rectangle placement = NotificationPlacement.CalculateCorner(
+                    window.targetPixelArea,
+                    window.targetScale,
+                    ordinal);
+                SetWindowPos(
+                    new WindowInteropHelper(window).Handle,
+                    IntPtr.Zero,
+                    placement.Left,
+                    placement.Top,
+                    placement.Width,
+                    placement.Height,
+                    SetWindowPosFlags.NoZOrder | SetWindowPosFlags.NoActivate);
             }
         }
 
@@ -155,19 +275,78 @@ namespace LocalReminder
         {
             Forms.Screen target = Forms.Screen.FromPoint(Forms.Cursor.Position);
             targetScreenKey = target.DeviceName;
-            System.Drawing.Rectangle pixels = target.WorkingArea;
+            targetPixelArea = fullScreen ? target.Bounds : target.WorkingArea;
+        }
+
+        private void CaptureTargetDpi()
+        {
+            WindowInteropHelper helper = new WindowInteropHelper(this);
+            int initialWidth = Math.Min(360, targetPixelArea.Width);
+            int initialHeight = Math.Min(126, targetPixelArea.Height);
+            SetWindowPos(
+                helper.Handle,
+                IntPtr.Zero,
+                targetPixelArea.Right - initialWidth,
+                targetPixelArea.Top,
+                initialWidth,
+                initialHeight,
+                SetWindowPosFlags.NoZOrder | SetWindowPosFlags.NoActivate);
+
+            try
+            {
+                uint dpi = GetDpiForWindow(helper.Handle);
+                if (dpi > 0) targetScale = dpi / 96.0;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                PresentationSource source = PresentationSource.FromVisual(this);
+                if (source != null && source.CompositionTarget != null)
+                    targetScale = source.CompositionTarget.TransformToDevice.M11;
+            }
+        }
+
+        private void PositionFullscreen()
+        {
+            WindowInteropHelper helper = new WindowInteropHelper(this);
+            bool positioned = SetWindowPos(
+                helper.Handle,
+                IntPtr.Zero,
+                targetPixelArea.Left,
+                targetPixelArea.Top,
+                targetPixelArea.Width,
+                targetPixelArea.Height,
+                SetWindowPosFlags.NoZOrder | SetWindowPosFlags.NoActivate);
+            if (positioned) return;
+
             PresentationSource source = PresentationSource.FromVisual(this);
-            if (source != null && source.CompositionTarget != null)
-            {
-                Matrix transform = source.CompositionTarget.TransformFromDevice;
-                Point topLeft = transform.Transform(new Point(pixels.Left, pixels.Top));
-                Point bottomRight = transform.Transform(new Point(pixels.Right, pixels.Bottom));
-                targetWorkArea = new Rect(topLeft, bottomRight);
-            }
-            else
-            {
-                targetWorkArea = SystemParameters.WorkArea;
-            }
+            if (source == null || source.CompositionTarget == null) return;
+            Matrix transform = source.CompositionTarget.TransformFromDevice;
+            Point topLeft = transform.Transform(new Point(targetPixelArea.Left, targetPixelArea.Top));
+            Point bottomRight = transform.Transform(new Point(targetPixelArea.Right, targetPixelArea.Bottom));
+            Left = topLeft.X;
+            Top = topLeft.Y;
+            Width = bottomRight.X - topLeft.X;
+            Height = bottomRight.Y - topLeft.Y;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(
+            IntPtr window,
+            IntPtr insertAfter,
+            int x,
+            int y,
+            int width,
+            int height,
+            SetWindowPosFlags flags);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr window);
+
+        [Flags]
+        private enum SetWindowPosFlags : uint
+        {
+            NoZOrder = 0x0004,
+            NoActivate = 0x0010
         }
     }
 }

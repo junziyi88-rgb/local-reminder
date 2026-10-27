@@ -10,6 +10,7 @@ namespace LocalReminder
         public Reminder()
         {
             Weekdays = new List<int>();
+            PopupMode = "corner";
             CreatedAt = DateTime.Now;
             UpdatedAt = DateTime.Now;
         }
@@ -22,6 +23,7 @@ namespace LocalReminder
         [DataMember] public string RepeatType { get; set; }
         [DataMember] public List<int> Weekdays { get; set; }
         [DataMember] public bool Enabled { get; set; }
+        [DataMember] public string PopupMode { get; set; }
         [DataMember] public DateTime? NextTriggerAt { get; set; }
         [DataMember] public DateTime CreatedAt { get; set; }
         [DataMember] public DateTime UpdatedAt { get; set; }

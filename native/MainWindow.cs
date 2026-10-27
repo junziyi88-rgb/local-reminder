@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -18,7 +19,11 @@ namespace LocalReminder
         private readonly StackPanel listPanel;
         private readonly TextBlock countText;
         private readonly DispatcherTimer schedulerTimer;
+        private readonly Stopwatch screenClock;
+        private readonly ScreenUsageTracker screenUsageTracker;
+        private readonly ScreenReminderProgress screenReminderProgress;
         private Forms.NotifyIcon trayIcon;
+        private ScreenPowerMonitor screenPowerMonitor;
         private List<Reminder> reminders;
         private bool allowExit;
         private bool storageErrorShown;
@@ -43,6 +48,9 @@ namespace LocalReminder
             string resolvedDataPath = dataFilePath ?? Path.Combine(dataDirectory, "reminders.json");
             store = new ReminderStore(resolvedDataPath);
             reminders = store.Load();
+            screenClock = Stopwatch.StartNew();
+            screenUsageTracker = new ScreenUsageTracker(screenClock.Elapsed);
+            screenReminderProgress = new ScreenReminderProgress();
 
             Grid root = new Grid();
             root.Margin = new Thickness(30);
@@ -56,7 +64,7 @@ namespace LocalReminder
 
             StackPanel brand = new StackPanel();
             TextBlock title = Theme.Text("定时提醒", 27, Theme.Ink, FontWeights.Bold);
-            TextBlock subtitle = Theme.Text("需要做的事，到点自然出现", 13, Theme.Muted, FontWeights.Normal);
+            TextBlock subtitle = Theme.Text("需要做的事，适时自然出现", 13, Theme.Muted, FontWeights.Normal);
             subtitle.Margin = new Thickness(0, 5, 0, 0);
             brand.Children.Add(title);
             brand.Children.Add(subtitle);
@@ -129,6 +137,27 @@ namespace LocalReminder
 
             if (enableBackground)
             {
+                SourceInitialized += delegate
+                {
+                    try
+                    {
+                        screenPowerMonitor = new ScreenPowerMonitor(
+                            this,
+                            delegate(bool screenOn) { screenUsageTracker.SetScreenOn(screenOn, screenClock.Elapsed); });
+                    }
+                    catch (Exception error)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            MessageBox.Show(
+                                this,
+                                "无法监听屏幕亮灭状态，连续亮屏提醒暂不可用：" + error.Message,
+                                "屏幕检测不可用",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Warning);
+                        }));
+                    }
+                };
                 trayIcon = new Forms.NotifyIcon();
                 trayIcon.Text = "定时提醒";
                 trayIcon.Visible = true;
@@ -162,7 +191,7 @@ namespace LocalReminder
             {
                 List<Reminder> candidate = new List<Reminder>(reminders);
                 candidate.Add(editor.ResultReminder);
-                TryCommit(candidate);
+                if (TryCommit(candidate)) ResetScreenReminder(editor.ResultReminder);
             }
         }
 
@@ -175,7 +204,7 @@ namespace LocalReminder
                 List<Reminder> candidate = new List<Reminder>(reminders);
                 int index = candidate.FindIndex(delegate(Reminder item) { return item.Id == reminder.Id; });
                 if (index >= 0) candidate[index] = editor.ResultReminder;
-                TryCommit(candidate);
+                if (TryCommit(candidate)) ResetScreenReminder(editor.ResultReminder);
             }
         }
 
@@ -190,7 +219,7 @@ namespace LocalReminder
             if (answer != MessageBoxResult.Yes) return;
             List<Reminder> candidate = new List<Reminder>(reminders);
             candidate.RemoveAll(delegate(Reminder item) { return item.Id == reminder.Id; });
-            TryCommit(candidate);
+            if (TryCommit(candidate)) screenReminderProgress.Remove(reminder.Id);
         }
 
         private void ToggleReminder(Reminder reminder, bool enabled)
@@ -200,8 +229,16 @@ namespace LocalReminder
             if (changed == null) return;
             changed.Enabled = enabled;
             changed.UpdatedAt = DateTime.Now;
-            changed.NextTriggerAt = enabled ? (DateTime?)ReminderScheduler.ComputeNext(changed, DateTime.Now) : null;
-            TryCommit(candidate);
+            changed.NextTriggerAt = enabled && changed.ScheduleType != "screenTime"
+                ? (DateTime?)ReminderScheduler.ComputeNext(changed, DateTime.Now)
+                : null;
+            if (TryCommit(candidate)) ResetScreenReminder(changed);
+        }
+
+        private void ResetScreenReminder(Reminder reminder)
+        {
+            TimeSpan usage = screenUsageTracker.GetUsage(screenClock.Elapsed);
+            screenReminderProgress.Reset(reminder, usage, screenUsageTracker.SessionId);
         }
 
         private void RenderReminders()
@@ -219,7 +256,7 @@ namespace LocalReminder
                 TextBlock heading = Theme.Text("还没有提醒事项", 17, Theme.Ink, FontWeights.Bold);
                 heading.HorizontalAlignment = HorizontalAlignment.Center;
                 heading.Margin = new Thickness(0, 10, 0, 6);
-                TextBlock copy = Theme.Text("新建第一条提醒，到点会在右上角出现。", 13, Theme.Muted, FontWeights.Normal);
+                TextBlock copy = Theme.Text("新建第一条提醒，到点会按设置方式弹出。", 13, Theme.Muted, FontWeights.Normal);
                 copy.HorizontalAlignment = HorizontalAlignment.Center;
                 empty.Children.Add(symbol);
                 empty.Children.Add(heading);
@@ -269,7 +306,8 @@ namespace LocalReminder
             TextBlock reminderTitle = Theme.Text(reminder.Title, 16, Theme.Ink, FontWeights.Bold);
             reminderTitle.TextTrimming = TextTrimming.CharacterEllipsis;
             reminderTitle.MaxWidth = 430;
-            TextBlock schedule = Theme.Text(ScheduleSummary(reminder), 13, Theme.Muted, FontWeights.Normal);
+            string popupSummary = reminder.PopupMode == "fullscreen" ? "全屏" : "右上角";
+            TextBlock schedule = Theme.Text(ScheduleSummary(reminder) + "  ·  " + popupSummary, 13, Theme.Muted, FontWeights.Normal);
             schedule.Margin = new Thickness(0, 7, 0, 0);
             content.Children.Add(reminderTitle);
             content.Children.Add(schedule);
@@ -312,11 +350,11 @@ namespace LocalReminder
 
         private static string ScheduleSummary(Reminder reminder)
         {
+            if (reminder.ScheduleType == "screenTime")
+                return "累计亮屏 " + FormatDuration(reminder.IntervalMinutes) + "（短暂息屏暂停）";
             if (reminder.ScheduleType == "interval")
             {
-                if (reminder.IntervalMinutes % 60 == 0)
-                    return "每 " + (reminder.IntervalMinutes / 60) + " 小时";
-                return "每 " + reminder.IntervalMinutes + " 分钟";
+                return "每 " + FormatDuration(reminder.IntervalMinutes);
             }
             if (reminder.RepeatType == "daily") return "每天 " + reminder.Time;
             if (reminder.RepeatType == "weekdays") return "工作日 " + reminder.Time;
@@ -330,6 +368,12 @@ namespace LocalReminder
         {
             if (!reminder.Enabled || !reminder.NextTriggerAt.HasValue)
             {
+                if (reminder.Enabled && reminder.ScheduleType == "screenTime")
+                {
+                    main = "亮屏";
+                    sub = FormatDuration(reminder.IntervalMinutes) + "后提醒";
+                    return;
+                }
                 main = "已暂停";
                 sub = "不会弹出提醒";
                 return;
@@ -371,6 +415,15 @@ namespace LocalReminder
             foreach (Reminder reminder in candidate)
             {
                 if (!reminder.Enabled) continue;
+                if (reminder.ScheduleType == "screenTime")
+                {
+                    if (reminder.NextTriggerAt.HasValue)
+                    {
+                        reminder.NextTriggerAt = null;
+                        changed = true;
+                    }
+                    continue;
+                }
                 if (!reminder.NextTriggerAt.HasValue || reminder.NextTriggerAt.Value <= now)
                 {
                     reminder.NextTriggerAt = ReminderScheduler.AdvanceOverdue(reminder, now);
@@ -394,32 +447,45 @@ namespace LocalReminder
         private void CheckDueReminders()
         {
             DateTime now = DateTime.Now;
+            TimeSpan screenUsage = screenUsageTracker.GetUsage(screenClock.Elapsed);
+            long screenSession = screenUsageTracker.SessionId;
             bool changed = false;
-            List<string> dueTitles = new List<string>();
+            List<Reminder> dueReminders = new List<Reminder>();
             List<Reminder> candidate = CloneReminders(reminders);
             foreach (Reminder reminder in candidate)
             {
+                if (reminder.ScheduleType == "screenTime")
+                {
+                    if (screenUsageTracker.IsScreenOn &&
+                        screenReminderProgress.IsDue(reminder, screenUsage, screenSession))
+                        dueReminders.Add(reminder);
+                    continue;
+                }
                 if (!reminder.Enabled || !reminder.NextTriggerAt.HasValue || reminder.NextTriggerAt.Value > now) continue;
                 if ((now - reminder.NextTriggerAt.Value).TotalSeconds <= 65)
-                    dueTitles.Add(reminder.Title);
+                    dueReminders.Add(reminder);
                 reminder.NextTriggerAt = ReminderScheduler.AdvanceOverdue(reminder, now);
                 reminder.UpdatedAt = now;
                 changed = true;
             }
-            if (!changed) return;
+            if (!changed && dueReminders.Count == 0) return;
 
-            reminders = candidate;
-            try
+            if (changed)
             {
-                store.Save(candidate);
-                storageErrorShown = false;
+                reminders = candidate;
+                try
+                {
+                    store.Save(candidate);
+                    storageErrorShown = false;
+                }
+                catch (Exception error)
+                {
+                    ShowStorageErrorLater(error);
+                }
+                RenderReminders();
             }
-            catch (Exception error)
-            {
-                ShowStorageErrorLater(error);
-            }
-            RenderReminders();
-            foreach (string title in dueTitles) new NotificationWindow(title).Show();
+            foreach (Reminder reminder in dueReminders)
+                NotificationWindow.ShowReminder(reminder.Title, reminder.PopupMode);
         }
 
         private void ShowStorageErrorLater(Exception error)
@@ -452,6 +518,7 @@ namespace LocalReminder
                     RepeatType = reminder.RepeatType,
                     Weekdays = reminder.Weekdays == null ? new List<int>() : new List<int>(reminder.Weekdays),
                     Enabled = reminder.Enabled,
+                    PopupMode = reminder.PopupMode,
                     NextTriggerAt = reminder.NextTriggerAt,
                     CreatedAt = reminder.CreatedAt,
                     UpdatedAt = reminder.UpdatedAt
@@ -471,6 +538,11 @@ namespace LocalReminder
         {
             allowExit = true;
             schedulerTimer.Stop();
+            if (screenPowerMonitor != null)
+            {
+                screenPowerMonitor.Dispose();
+                screenPowerMonitor = null;
+            }
             if (trayIcon != null)
             {
                 trayIcon.Visible = false;
@@ -484,6 +556,12 @@ namespace LocalReminder
             if (allowExit) return;
             eventArgs.Cancel = true;
             Hide();
+        }
+
+        private static string FormatDuration(int minutes)
+        {
+            if (minutes % 60 == 0) return (minutes / 60) + " 小时";
+            return minutes + " 分钟";
         }
     }
 }

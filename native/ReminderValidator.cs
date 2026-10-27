@@ -12,7 +12,11 @@ namespace LocalReminder
             reminder.Title = (reminder.Title ?? string.Empty).Trim();
             if (reminder.Title.Length == 0) throw new ArgumentException("请输入提醒内容");
 
-            if (reminder.ScheduleType == "interval")
+            if (string.IsNullOrWhiteSpace(reminder.PopupMode)) reminder.PopupMode = "corner";
+            if (reminder.PopupMode != "corner" && reminder.PopupMode != "fullscreen")
+                throw new ArgumentException("请选择弹窗方式");
+
+            if (reminder.ScheduleType == "interval" || reminder.ScheduleType == "screenTime")
             {
                 if (reminder.IntervalMinutes < 1 || reminder.IntervalMinutes > 525600)
                     throw new ArgumentException("提醒间隔必须在 1 到 525600 分钟之间");

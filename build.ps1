@@ -31,14 +31,14 @@ try {
     & .\native-tests\SchedulerTests.exe
     if ($LASTEXITCODE -ne 0) { throw '自动测试失败。' }
 
-    & $compilerPath /nologo /target:exe /platform:anycpu /optimize+ /main:UiSmoke `
+    & $compilerPath /nologo /target:exe /platform:anycpu /optimize+ /main:UiSmoke /win32manifest:build\app.manifest `
         $references /out:native-tests\UiSmoke.exe native-tests\UiSmoke.cs native\*.cs
     if ($LASTEXITCODE -ne 0) { throw '界面冒烟测试编译失败。' }
 
     & .\native-tests\UiSmoke.exe
     if ($LASTEXITCODE -ne 0) { throw '界面冒烟测试失败。' }
 
-    & $compilerPath /nologo /target:winexe /platform:anycpu /optimize+ /win32icon:build\icon.ico `
+    & $compilerPath /nologo /target:winexe /platform:anycpu /optimize+ /win32icon:build\icon.ico /win32manifest:build\app.manifest `
         $references /out:定时提醒.exe native\*.cs
     if ($LASTEXITCODE -ne 0) { throw '应用编译失败。' }
 

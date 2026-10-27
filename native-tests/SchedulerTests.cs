@@ -37,6 +37,15 @@ internal static class SchedulerTests
 
     public static int Main()
     {
+        string manifestPath = Path.Combine("build", "app.manifest");
+        if (File.Exists(manifestPath) && File.ReadAllText(manifestPath).Contains("PerMonitorV2"))
+            Console.WriteLine("PASS per-monitor DPI manifest");
+        else
+        {
+            failures++;
+            Console.WriteLine("FAIL per-monitor DPI manifest");
+        }
+
         DateTime now = new DateTime(2026, 10, 10, 8, 0, 0);
         Equal(
             new DateTime(2026, 10, 10, 8, 30, 0),
@@ -96,6 +105,22 @@ internal static class SchedulerTests
             });
         }, "empty custom weekdays");
 
+        try
+        {
+            ReminderValidator.Validate(new Reminder
+            {
+                Title = "休息一下",
+                ScheduleType = "screenTime",
+                IntervalMinutes = 20
+            });
+            Console.WriteLine("PASS screen time reminder validation");
+        }
+        catch (ArgumentException)
+        {
+            failures++;
+            Console.WriteLine("FAIL screen time reminder validation");
+        }
+
         string storeDirectory = Path.Combine(Path.GetTempPath(), "local-reminder-tests-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(storeDirectory);
         string storePath = Path.Combine(storeDirectory, "reminders.json");
@@ -103,7 +128,7 @@ internal static class SchedulerTests
         List<Reminder> loaded;
         try
         {
-        store.Save(new List<Reminder> { new Reminder { Id = "1", Title = "喝水", Enabled = true, ScheduleType = "interval", IntervalMinutes = 30 } });
+            File.WriteAllText(storePath, "[{\"Id\":\"1\",\"Title\":\"喝水\",\"Enabled\":true,\"ScheduleType\":\"interval\",\"IntervalMinutes\":30}]");
             loaded = store.Load();
         }
         catch (Exception error)
@@ -112,13 +137,43 @@ internal static class SchedulerTests
             Console.WriteLine("STORE_ERROR_MESSAGE {0}", error.Message);
             return 1;
         }
-        if (loaded.Count == 1 && loaded[0].Title == "喝水")
-            Console.WriteLine("PASS store roundtrip");
+        if (loaded.Count == 1 && loaded[0].Title == "喝水" && loaded[0].PopupMode == "corner")
+            Console.WriteLine("PASS legacy reminder defaults to corner popup");
         else
         {
             failures++;
-            Console.WriteLine("FAIL store roundtrip");
+            Console.WriteLine("FAIL legacy reminder defaults to corner popup");
         }
+
+        Reminder fullscreenReminder = new Reminder
+        {
+            Id = "fullscreen",
+            Title = "全屏提醒",
+            Enabled = true,
+            ScheduleType = "interval",
+            IntervalMinutes = 30,
+            PopupMode = "fullscreen"
+        };
+        store.Save(new List<Reminder> { fullscreenReminder });
+        loaded = store.Load();
+        if (loaded.Count == 1 && loaded[0].PopupMode == "fullscreen")
+            Console.WriteLine("PASS fullscreen popup mode roundtrip");
+        else
+        {
+            failures++;
+            Console.WriteLine("FAIL fullscreen popup mode roundtrip");
+        }
+
+        Reminder invalidModeReminder = new Reminder
+        {
+            Id = "invalid-mode",
+            Title = "无效显示方式",
+            Enabled = true,
+            ScheduleType = "interval",
+            IntervalMinutes = 30,
+            PopupMode = "giant"
+        };
+        Throws(delegate { ReminderValidator.Validate(invalidModeReminder); }, "invalid popup mode");
 
         File.WriteAllText(storePath, "{broken");
         loaded = store.Load();
